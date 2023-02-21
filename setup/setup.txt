@@ -1,0 +1,105 @@
+# instances
+7 instances
+   - 1 mongos instance
+   - 3 shard instances
+   - 3 config instances
+Ubuntu 20.04 LTS (HVM), SSD Volume Type, 64-bit
+t2.large
+16 GiB gp2 storage
+
+Security Group Rules:
+   inbound rules
+      port 22 tcp 0.0.0.0/0 # for ssh connections
+      port 27017-27030 tcp (security-group-id-containing-instances) # for internal mongodb communication
+      port 29453 tcp 0.0.0.0/0 # for end-to-end connection to mongos (MONGOS INSTANCE ONLY)
+   outbound rules
+      port ALL TCP/UDP 0.0.0.0/0
+
+(Optional, recommended) Elastic IP
+   Assign elastic IP to mongos instance for static IP for end-to-end connection
+
+# copy files to instances
+scp -i "C:\Users\kwsni\.ssh\cs157c-group-project.pem" C:\Users\kwsni\OneDrive\Documents\school\Undergrad\4th_year\fall_semester\CS_157C\proj\archive\part*.json ubuntu@shardPublicIP:/home/ubuntu
+scp -i "C:\Users\kwsni\.ssh\cs157c-group-project.pem" C:\Users\kwsni\OneDrive\Documents\school\Undergrad\4th_year\fall_semester\CS_157C\proj\setup\shard\* ubuntu@shard-publicIP:/home/ubuntu
+scp -i "C:\Users\kwsni\.ssh\cs157c-group-project.pem" C:\Users\kwsni\OneDrive\Documents\school\Undergrad\4th_year\fall_semester\CS_157C\proj\setup\conf\* ubuntu@conf-publicIP:/home/ubuntu
+scp -i "C:\Users\kwsni\.ssh\cs157c-group-project.pem" C:\Users\kwsni\OneDrive\Documents\school\Undergrad\4th_year\fall_semester\CS_157C\proj\setup\mongos\* ubuntu@mongos-publicIP:/home/ubuntu
+
+sudo mv *.conf /etc
+sudo mv *.service /lib/systemd/system
+
+# install mongodb
+wget -qO - https://www.mongodb.org/static/pgp/server-6.0.asc | sudo apt-key add -
+echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/6.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
+sudo apt-get update
+sudo apt-get upgrade
+sudo apt-get install -y mongodb-org
+
+# setup environment
+sudo mkdir -p /db/config   # for config servers
+sudo mkdir -p /db/a /db/b /db/c   # for shard servers
+sudo chmod 777 -R /db
+sudo chmod 777 /var/log/mongodb
+sudo chmod 777 /etc/mongo*
+sudo chmod 777 /lib/systemd/system/mongo*
+
+# config servers
+sudo systemctl start mongod-conf.service
+sudo systemctl enable mongod-conf.service
+
+mongosh --port 27021
+   rs.initiate({_id:"config",configsvr:true,members:[{_id: 0,host:"172.31.79.78:27021"},{_id: 1,host:"172.31.75.30:27021"},{_id: 2,host:"172.31.67.79:27021"}]})   # use instance private IPs for host IP
+   cfg = rs.conf()
+   cfg.members[0].priority = 2
+   rs.reconfig(cfg)
+
+
+# shard servers
+sudo systemctl start mongod-a.service
+sudo systemctl start mongod-b.service
+sudo systemctl start mongod-c.service
+sudo systemctl enable mongod-a.service
+sudo systemctl enable mongod-b.service
+sudo systemctl enable mongod-c.service
+
+mongosh --port 27022
+   rs.initiate({_id:"a",members:[{_id: 0,host:"172.31.78.199:27022"},{_id: 1,host:"172.31.75.41:27022"},{_id: 2,host:"172.31.79.203:27022"}]})   # use instance private IPs for host IP
+   cfg = rs.conf()
+   cfg.members[0].priority = 2
+   rs.reconfig(cfg)
+
+mongosh --port 27023
+   rs.initiate({_id:"b",members:[{_id: 0,host:"172.31.75.41:27023"},{_id: 1,host:"172.31.79.203:27023"},{_id: 2,host:"172.31.78.199:27023"}]})   # use instance private IPs for host IP
+   cfg = rs.conf()
+   cfg.members[0].priority = 2
+   rs.reconfig(cfg)
+
+mongosh --port 27024
+   rs.initiate({_id:"c",members:[{_id: 0,host:"172.31.79.203:27024"},{_id: 1,host:"172.31.78.199:27024"},{_id: 2,host:"172.31.75.41:27024"}]})   # use instance private IPs for host IP
+   cfg = rs.conf()
+   cfg.members[0].priority = 2
+   rs.reconfig(cfg)
+
+# manual start mongod
+sudo mongod --configsvr --replSet config --dbpath /db/config --port 27021 --fork --logpath /var/log/mongodb/log.dbconfig --bind_ip_all
+sudo mongod --shardsvr --replSet a --dbpath /db/a --port 27022 --fork --logpath /var/log/mongodb/log.a --bind_ip_all
+sudo mongod --shardsvr --replSet b --dbpath /db/b --port 27023 --fork --logpath /var/log/mongodb/log.b --bind_ip_all
+sudo mongod --shardsvr --replSet c --dbpath /db/c --port 27024 --fork --logpath /var/log/mongodb/log.c --bind_ip_all
+
+# sharding setup
+sudo systemctl start mongos-proj.service
+sudo systemctl enable mongos-proj.service
+
+mongosh --port 29543
+   sh.addShard("a/172.31.78.199:27022")   # use instance private IPs for host IP
+   sh.addShard("b/172.31.75.41:27023")   # use instance private IPs for host IP
+   sh.addShard("c/172.31.79.203:27024")   # use instance private IPs for host IP
+   sh.enableSharding("movies")
+   sh.shardCollection("movies.reviews", {"review_id":"hashed"})
+
+# importing data
+mongoimport -d movies -c reviews --file=part-01.json --port 29453 --jsonArray --batchSize 100 --stopOnError
+mongoimport -d movies -c reviews --file=part-02.json --port 29453 --jsonArray --batchSize 100 --stopOnError
+mongoimport -d movies -c reviews --file=part-03.json --port 29453 --jsonArray --batchSize 100 --stopOnError
+mongoimport -d movies -c reviews --file=part-04.json --port 29453 --jsonArray --batchSize 100 --stopOnError
+mongoimport -d movies -c reviews --file=part-05.json --port 29453 --jsonArray --batchSize 100 --stopOnError
+mongoimport -d movies -c reviews --file=part-06.json --port 29453 --jsonArray --batchSize 100 --stopOnError
